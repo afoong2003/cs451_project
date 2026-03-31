@@ -2,8 +2,8 @@ import zmq
 import json
 import argparse
 
-INGESTION_NODE_IP = "localhost" 
-EXECUTION_NODE_IP = "localhost" 
+INGESTION_NODE_IP = "192.168.1.1" 
+EXECUTION_NODE_IP = "192.168.1.3" 
 
 def main():
     parser = argparse.ArgumentParser(description="Worker Node for Trading Bot")
