@@ -1,45 +1,30 @@
-import os
 import json
 import zmq
-from dotenv import load_dotenv
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
 
-load_dotenv()
+ZMQ_PULL_PORT = 5556
+QTY_DECIMALS = 8
 
-ALPACA_API_KEY = os.getenv("ALPACA_PAPER_API_KEY")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_PAPER_SECRET_KEY")
-
-ZMQ_PULL_PORT = 5556 
-
-
-def has_open_position(trading_client, symbol):
-    positions = trading_client.get_all_positions()
-    for position in positions:
-        if position.symbol == symbol and abs(float(position.qty)) > 0:
-            return True
-    return False
 
 def main():
+    print(f"Starting execution:")
     context = zmq.Context()
-    
     receiver = context.socket(zmq.PULL)
     receiver.bind(f"tcp://*:{ZMQ_PULL_PORT}")
 
-    print("Starting trade :")
-    trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+    positions = {}
 
-    print("Waiting for decisions to execute: ")
+    print("Waiting for decisions")
 
     try:
         while True:
             message = receiver.recv_string()
+
             try:
                 signal = json.loads(message)
                 symbol = str(signal.get("symbol", "")).upper()
                 action = str(signal.get("action", "")).upper()
-                qty = int(signal.get("qty", 1))
+                qty = float(signal.get("qty", 0.0))
+                trigger_price = float(signal.get("trigger_price", 0.0))
             except (json.JSONDecodeError, ValueError, TypeError):
                 print(f"ERROR: Invalid signal payload received: {message}")
                 continue
@@ -47,37 +32,40 @@ def main():
             if not symbol or action not in {"BUY", "SELL"} or qty <= 0:
                 print(f"ERROR: Invalid trading signal fields: {signal}")
                 continue
-            
-            print(f"Received Command: {action} {qty} shares of {symbol}")
 
-            try:
-                if action == "BUY":
-                    order_data = MarketOrderRequest(
-                        symbol=symbol,
-                        qty=qty,
-                        side=OrderSide.BUY,
-                        time_in_force=TimeInForce.DAY
-                    )
-                    trading_client.submit_order(order_data=order_data)
-                    print(f"SUCCESS: Order filled for {symbol}\n")
+            current_qty = float(positions.get(symbol, 0.0))
 
-                elif action == "SELL":
-                    position_exists = has_open_position(trading_client, symbol)
-                    if not position_exists:
-                        print(f"SKIP: No open position for {symbol}; SELL ignored.\n")
-                        continue
+            if action == "BUY":
+                new_qty = current_qty + qty
+                positions[symbol] = new_qty
+                print(
+                    f"BOUGHT ({symbol}) qty={qty:.{QTY_DECIMALS}f} "
+                    f"@ ${trigger_price:.6f} | position={new_qty:.{QTY_DECIMALS}f}"
+                )
 
-                    trading_client.close_position(symbol)
-                    print(f"SUCCESS: Position closed for {symbol}\n")
-                    
-            except Exception as e:
-                print(f"ERROR: Failed to execute trade for {symbol}. {e}\n")
+            elif action == "SELL":
+                if current_qty <= 0:
+                    print(f"SKIP: No open crypto position for {symbol}; SELL ignored.")
+                    continue
+
+                sell_qty = min(qty, current_qty)
+                remaining_qty = max(current_qty - sell_qty, 0.0)
+                if remaining_qty > 0:
+                    positions[symbol] = remaining_qty
+                else:
+                    positions.pop(symbol, None)
+
+                print(
+                    f"SOLD ({symbol}) qty={sell_qty:.{QTY_DECIMALS}f} "
+                    f"@ ${trigger_price:.6f} | position={remaining_qty:.{QTY_DECIMALS}f}"
+                )
 
     except KeyboardInterrupt:
-        print("\nShutting down Execution Node...")
+        print("\nShutting down decision logger node...")
     finally:
         receiver.close()
         context.term()
+
 
 if __name__ == "__main__":
     main()

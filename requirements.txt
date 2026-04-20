@@ -1,10 +1,5 @@
-alpaca-py
-pyzmq
-python-dotenv
-pandas
 numpy
-yfinance
+pandas
+pyzmq
 websockets
-requests
-pydantic
-pytest
+yfinance

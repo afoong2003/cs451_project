@@ -12,6 +12,8 @@ FAST_WINDOW = 10
 SLOW_WINDOW = 50
 RSI_WINDOW = 14
 WARMUP_BARS = 200
+BUY_NOTIONAL_USD = 50.0
+ORDER_QTY_PRECISION = 8
 
 
 
@@ -77,14 +79,15 @@ def calculate_indicators(price_data, fast_window=10, slow_window=50, rsi_window=
 
 
 def decide_action(previous_price, live_price, sma_10, sma_50, rsi_14, position):
-    if isinstance(position, int):
-        position_size = max(position, 0)
+    if isinstance(position, (int, float)):
+        position_size = max(float(position), 0.0)
 
         if position_size > 0 and previous_price >= sma_10 and live_price < sma_10:
-            return "SELL", 0
+            return "SELL", 0.0
 
-        if previous_price <= sma_50 and live_price > sma_50 and rsi_14 < 70:
-            return "BUY", position_size + 1
+        if previous_price <= sma_50 and live_price > sma_50 and rsi_14 < 70 and live_price > 0:
+            buy_qty = BUY_NOTIONAL_USD / live_price
+            return "BUY", position_size + buy_qty
 
         return None, position_size
 
@@ -99,13 +102,24 @@ def decide_action(previous_price, live_price, sma_10, sma_50, rsi_14, position):
     return None, position
 
 
+def _to_yfinance_symbol(symbol):
+    upper = symbol.upper()
+    if upper.endswith("USDT") and len(upper) > 4:
+        return f"{upper[:-4]}-USD"
+    return upper
+
+
 def warmup_close_history(symbol, min_points):
     import yfinance as yf
 
-    data = yf.download(symbol, period="7d", interval="1m", progress=False)
+    yf_symbol = _to_yfinance_symbol(symbol)
+    data = yf.download(yf_symbol, period="7d", interval="1m", progress=False)
 
     if data.empty:
-        raise ValueError(f"Could not fetch warm-up bar data for {symbol}.")
+        raise ValueError(
+            f"Could not fetch warm-up bar data for {symbol} "
+            f"(mapped to yfinance symbol {yf_symbol})."
+        )
 
     close_prices = _normalize_prices(data)
     if len(close_prices) < min_points:
@@ -154,7 +168,7 @@ def main():
     pusher = context.socket(zmq.PUSH)
     pusher.connect(f"tcp://{EXECUTION_NODE_IP}:5556")
 
-    position_size = 0
+    position_size = 0.0
     previous_price = float(rolling_closes[-1])
     print(f"[{ASSIGNED_SYMBOL}] Listening for live market ticks...")
 
@@ -204,11 +218,19 @@ def main():
             print(
                 f"[TICK] {ASSIGNED_SYMBOL} {tick_timestamp} price=${live_price:.2f} "
                 f"SMA{FAST_WINDOW}=${sma_10:.2f} SMA{SLOW_WINDOW}=${sma_50:.2f} "
-                f"RSI{RSI_WINDOW}={rsi_14:.2f} shares={position_size}"
+                f"RSI{RSI_WINDOW}={rsi_14:.2f} units={position_size:.8f}"
             )
             
             if action:
-                signal_qty = 1 if action == "BUY" else max(current_size, 1)
+                if action == "BUY":
+                    signal_qty = round(max(next_position - current_size, 0.0), ORDER_QTY_PRECISION)
+                else:
+                    signal_qty = round(max(current_size, 0.0), ORDER_QTY_PRECISION)
+
+                if signal_qty <= 0:
+                    previous_price = live_price
+                    continue
+
                 signal = {
                     "symbol": ASSIGNED_SYMBOL, 
                     "action": action, 
@@ -219,10 +241,12 @@ def main():
                     "sma_50": round(sma_50, 4),
                     "rsi_14": round(rsi_14, 4),
                 }
+                if action == "BUY":
+                    signal["notional_usd"] = BUY_NOTIONAL_USD
                 pusher.send_string(json.dumps(signal))
                 print(
                     f"[DECISION] {ASSIGNED_SYMBOL} @ ${live_price:.2f} | "
-                    f"Action: {action} qty={signal_qty} shares={position_size} | ts={tick_timestamp}"
+                    f"Action: {action} qty={signal_qty:.8f} units={position_size:.8f} | ts={tick_timestamp}"
                 )
 
             previous_price = live_price
