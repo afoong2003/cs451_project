@@ -2,6 +2,9 @@ alpaca-py
 pyzmq
 python-dotenv
 pandas
+numpy
+yfinance
 websockets
 requests
 pydantic
+pytest

@@ -13,8 +13,15 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_PAPER_SECRET_KEY")
 
 ZMQ_PULL_PORT = 5556 
 
+
+def has_open_position(trading_client, symbol):
+    positions = trading_client.get_all_positions()
+    for position in positions:
+        if position.symbol == symbol and abs(float(position.qty)) > 0:
+            return True
+    return False
+
 def main():
-    print(f"starting node:  {ZMQ_PULL_PORT}...")
     context = zmq.Context()
     
     receiver = context.socket(zmq.PULL)
@@ -28,17 +35,22 @@ def main():
     try:
         while True:
             message = receiver.recv_string()
-            signal = json.loads(message)
-            
-            symbol = signal.get("symbol")
-            action = signal.get("action")  
-            qty = signal.get("qty", 1)     
+            try:
+                signal = json.loads(message)
+                symbol = str(signal.get("symbol", "")).upper()
+                action = str(signal.get("action", "")).upper()
+                qty = int(signal.get("qty", 1))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                print(f"ERROR: Invalid signal payload received: {message}")
+                continue
+
+            if not symbol or action not in {"BUY", "SELL"} or qty <= 0:
+                print(f"ERROR: Invalid trading signal fields: {signal}")
+                continue
             
             print(f"Received Command: {action} {qty} shares of {symbol}")
 
             try:
-                trading_client.cancel_orders() 
-                
                 if action == "BUY":
                     order_data = MarketOrderRequest(
                         symbol=symbol,
@@ -50,6 +62,11 @@ def main():
                     print(f"SUCCESS: Order filled for {symbol}\n")
 
                 elif action == "SELL":
+                    position_exists = has_open_position(trading_client, symbol)
+                    if not position_exists:
+                        print(f"SKIP: No open position for {symbol}; SELL ignored.\n")
+                        continue
+
                     trading_client.close_position(symbol)
                     print(f"SUCCESS: Position closed for {symbol}\n")
                     
